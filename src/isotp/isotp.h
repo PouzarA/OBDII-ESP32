@@ -19,111 +19,71 @@
  *   - ISO 15765-2:2016 — Transportní protokol a služby síťové vrstvy
  *   - ISO 15765-4:2005 — Požadavky na emisně relevantní systémy (OBD-II)
  *
- * @author Aleš (bakalářský projekt OBD-II)
+ * @author Ales Pouzar
  */
 
 #ifndef ISOTP_H
 #define ISOTP_H
 
-#include <stdint.h>
-#include <stdbool.h>
-#include <string.h>
-#include <stdio.h>
+#include "config.h"
+
 #include "driver/twai.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* ========================================================================= */
-/*  Konfigurace — případně přepište pomocí #define před #include             */
+/*  Konfigurace */
 /* ========================================================================= */
-
-/**
- * @brief Maximální velikost ISO-TP payloadu v bajtech.
- *
- * Teoretický limit ISO-TP je 4095 B, pro OBD-II ale stačí méně:
- *   - VIN (Mode 09 PID 02) = 20 B
- *   - 126 DTC kódů (Mode 03) = 252 B
- * Hodnota 256 B je bezpečný kompromis mezi pamětí a funkčností.
- */
-#ifndef ISOTP_MAX_PAYLOAD
-#define ISOTP_MAX_PAYLOAD           256
-#endif
-
-/**
- * @brief Výplňový bajt pro nevyužité pozice v CAN rámci.
- *
- * CAN rámec má pevnou délku 8 B; pokud ISO-TP naplní méně, zbylé
- * bajty se vyplňují konstantou. Hodnota 0xCC je běžná konvence
- * (používá ji například ELM327).
- */
-#ifndef ISOTP_PADDING_BYTE
-#define ISOTP_PADDING_BYTE          0xCC
-#endif
-
-/**
- * @brief Velikost TWAI RX fronty (počet CAN rámců).
- *
- * Na reálné CAN sběrnici v autě (500 kbit/s) může být 50+ non-OBD rámců
- * za sekundu (ABS, airbag, klima, BCM...). Když je fronta plná, TWAI
- * driver nové rámce tiše zahazuje — mezi nimi může být i naše OBD
- * odpověď.
- *
- * Každý slot zabírá ~16 bajtů (twai_message_t). Paměťová náročnost:
- *   32 slotů =  ~512 B  (nedostatečné pro vytíženou sběrnici)
- *   64 slotů = ~1024 B  (bezpečné minimum pro OBD-II)
- *  128 slotů = ~2048 B  (pro velmi zatížené sběrnice)
- *
- * Výchozí hodnota 64 je kompromis mezi spolehlivostí a spotřebou RAM
- * na ESP32 (520 KB SRAM).
- */
-#ifndef ISOTP_TWAI_RX_QUEUE_LEN
-#define ISOTP_TWAI_RX_QUEUE_LEN    64
-#endif
 
 /* ---- Časování (ms) — dle ISO 15765-4:2005 Table 6 --------------------- */
 
 /** @brief N_As — maximální doba odeslání jednoho CAN rámce (vysílač). */
-#define ISOTP_N_AS_TIMEOUT_MS       25
+#define ISOTP_N_AS_TIMEOUT_MS 25
 /** @brief N_Ar — maximální doba přijetí jednoho CAN rámce (přijímač). */
-#define ISOTP_N_AR_TIMEOUT_MS       25
+#define ISOTP_N_AR_TIMEOUT_MS 25
 /** @brief N_Bs — timeout čekání na Flow Control po odeslání First Frame. */
-#define ISOTP_N_BS_TIMEOUT_MS       75
+#define ISOTP_N_BS_TIMEOUT_MS 75
 /** @brief N_Cr — timeout čekání na další Consecutive Frame. */
-#define ISOTP_N_CR_TIMEOUT_MS       150
+#define ISOTP_N_CR_TIMEOUT_MS 150
 
 /* ---- Parametry Flow Control — dle ISO 15765-4:2005 Table 7 ------------ */
 
 /** @brief BlockSize = 0: posílat všechny CF po jediném FC bez dalšího FC. */
-#define ISOTP_FC_BS                 0
+#define ISOTP_FC_BS 0
 /** @brief STmin = 0: posílat CF tak rychle, jak to jde (bez mezery). */
-#define ISOTP_FC_STMIN              0
+#define ISOTP_FC_STMIN 0
 
 /* ---- Konstanty CAN ID pro OBD-II — dle ISO 15765-4:2005 Table 3 ------- */
 
 /** @brief Funkční broadcast request ID (11-bit) — dotaz na všechny ECU. */
-#define ISOTP_OBD_FUNC_REQ_ID      0x7DF
+#define ISOTP_OBD_FUNC_REQ_ID 0x7DF
 /** @brief Počátek fyzického rozsahu request ID (ECU #1 = 0x7E0). */
-#define ISOTP_OBD_PHYS_REQ_BASE    0x7E0
+#define ISOTP_OBD_PHYS_REQ_BASE 0x7E0
 /** @brief Počátek fyzického rozsahu response ID (ECU #1 = 0x7E8). */
-#define ISOTP_OBD_PHYS_RESP_BASE   0x7E8
+#define ISOTP_OBD_PHYS_RESP_BASE 0x7E8
 /** @brief Maximální počet ECU odpovídajících na broadcast dle ISO 15765-4. */
-#define ISOTP_MAX_ECU_RESPONSES     8
+#define ISOTP_MAX_ECU_RESPONSES 8
 
 /* ---- Konstanty CAN ---------------------------------------------------- */
 
 /** @brief DLC (Data Length Code) standardního CAN rámce — vždy 8 B. */
-#define ISOTP_CAN_DLC               8
-/** @brief Maximální počet bajtů užitečných dat v rámci SF (1 B PCI + 7 B data). */
-#define ISOTP_CAN_MAX_DATA          7   /* SF payload max */
+#define ISOTP_CAN_DLC 8
+/** @brief Maximální počet bajtů užitečných dat v rámci SF (1 B PCI + 7 B data).
+ */
+#define ISOTP_CAN_MAX_DATA 7 /* SF payload max */
 /** @brief Počet bajtů užitečných dat v rámci FF (2 B PCI + 6 B data). */
-#define ISOTP_CAN_FF_DATA           6   /* FF první bajty payloadu */
+#define ISOTP_CAN_FF_DATA 6 /* FF první bajty payloadu */
 /** @brief Počet bajtů užitečných dat v každém rámci CF (1 B PCI + 7 B data). */
-#define ISOTP_CAN_CF_DATA           7   /* CF bajty payloadu na rámec */
+#define ISOTP_CAN_CF_DATA 7 /* CF bajty payloadu na rámec */
 
 /* ========================================================================= */
 /*  Logování                                                                 */
@@ -136,28 +96,16 @@ extern "C" {
  * veškerý výstup, TRACE produkuje nejvíce detailů (každý CAN rámec).
  */
 typedef enum {
-    ISOTP_LOG_NONE  = 0,
-    ISOTP_LOG_ERROR = 1,
-    ISOTP_LOG_WARN  = 2,
-    ISOTP_LOG_INFO  = 3,
-    ISOTP_LOG_DEBUG = 4,
-    ISOTP_LOG_TRACE = 5
+  ISOTP_LOG_NONE = 0,
+  ISOTP_LOG_ERROR = 1,
+  ISOTP_LOG_WARN = 2,
+  ISOTP_LOG_INFO = 3,
+  ISOTP_LOG_DEBUG = 4,
+  ISOTP_LOG_TRACE = 5
 } isotp_log_level_t;
 
-/**
- * @brief Maximální úroveň logování zapečená v době překladu.
- *
- * Zprávy s vyšší úrovní jsou při kompilaci odstraněny (šetří flash).
- * Pro omezení je třeba makro nadefinovat před #include této hlavičky.
- */
-#ifndef ISOTP_LOG_MAX_LEVEL
-#define ISOTP_LOG_MAX_LEVEL         ISOTP_LOG_TRACE
-#endif
-
 /* Prefixy logovacích úrovní (indexovány hodnotou isotp_log_level_t). */
-static const char *_isotp_log_prefix[] = {
-    "---", "ERR", "WRN", "INF", "DBG", "TRC"
-};
+extern const char *_isotp_log_prefix[];
 
 /* Runtime úroveň logu — nastavuje se funkcí isotp_set_log_level(). */
 extern isotp_log_level_t _isotp_runtime_log_level;
@@ -166,19 +114,19 @@ extern isotp_log_level_t _isotp_runtime_log_level;
  * @brief Hlavní logovací makro — kontroluje jak překladovou, tak
  *        runtime úroveň logování.
  */
-#define ISOTP_LOG(level, fmt, ...) \
-    do { \
-        if ((level) <= ISOTP_LOG_MAX_LEVEL && \
-            (level) <= _isotp_runtime_log_level) { \
-            printf("[ISOTP %s] " fmt "\n", \
-                   _isotp_log_prefix[(level)], ##__VA_ARGS__); \
-        } \
-    } while(0)
+#define ISOTP_LOG(level, fmt, ...)                                             \
+  do {                                                                         \
+    if ((level) <= ISOTP_LOG_MAX_LEVEL &&                                      \
+        (level) <= _isotp_runtime_log_level) {                                 \
+      printf("[ISOTP %s] " fmt "\n", _isotp_log_prefix[(level)],               \
+             ##__VA_ARGS__);                                                   \
+    }                                                                          \
+  } while (0)
 
 /** @brief Zkratková makra pro jednotlivé úrovně logování. */
 #define ISOTP_LOGE(fmt, ...) ISOTP_LOG(ISOTP_LOG_ERROR, fmt, ##__VA_ARGS__)
-#define ISOTP_LOGW(fmt, ...) ISOTP_LOG(ISOTP_LOG_WARN,  fmt, ##__VA_ARGS__)
-#define ISOTP_LOGI(fmt, ...) ISOTP_LOG(ISOTP_LOG_INFO,  fmt, ##__VA_ARGS__)
+#define ISOTP_LOGW(fmt, ...) ISOTP_LOG(ISOTP_LOG_WARN, fmt, ##__VA_ARGS__)
+#define ISOTP_LOGI(fmt, ...) ISOTP_LOG(ISOTP_LOG_INFO, fmt, ##__VA_ARGS__)
 #define ISOTP_LOGD(fmt, ...) ISOTP_LOG(ISOTP_LOG_DEBUG, fmt, ##__VA_ARGS__)
 #define ISOTP_LOGT(fmt, ...) ISOTP_LOG(ISOTP_LOG_TRACE, fmt, ##__VA_ARGS__)
 
@@ -195,10 +143,10 @@ extern isotp_log_level_t _isotp_runtime_log_level;
  * kde n je pomocné pole (délka / SN / FlowStatus).
  */
 typedef enum {
-    ISOTP_PCI_SF = 0x00,    /**< Single Frame — samostatná zpráva do 7 B. */
-    ISOTP_PCI_FF = 0x10,    /**< First Frame — první rámec multi-frame. */
-    ISOTP_PCI_CF = 0x20,    /**< Consecutive Frame — navazující rámec. */
-    ISOTP_PCI_FC = 0x30     /**< Flow Control — řízení toku od přijímače. */
+  ISOTP_PCI_SF = 0x00, /**< Single Frame — samostatná zpráva do 7 B. */
+  ISOTP_PCI_FF = 0x10, /**< First Frame — první rámec multi-frame. */
+  ISOTP_PCI_CF = 0x20, /**< Consecutive Frame — navazující rámec. */
+  ISOTP_PCI_FC = 0x30  /**< Flow Control — řízení toku od přijímače. */
 } isotp_pci_type_t;
 
 /**
@@ -208,9 +156,9 @@ typedef enum {
  * odesílateli po přijetí First Frame nebo po vyčerpání BlockSize.
  */
 typedef enum {
-    ISOTP_FC_CTS       = 0x00,  /**< Continue To Send — můžeš posílat CF. */
-    ISOTP_FC_WAIT      = 0x01,  /**< Wait — počkej na další FC. */
-    ISOTP_FC_OVERFLOW  = 0x02   /**< Overflow — zpráva se nevejde, přeruš přenos. */
+  ISOTP_FC_CTS = 0x00,  /**< Continue To Send — můžeš posílat CF. */
+  ISOTP_FC_WAIT = 0x01, /**< Wait — počkej na další FC. */
+  ISOTP_FC_OVERFLOW = 0x02 /**< Overflow — zpráva se nevejde, přeruš přenos. */
 } isotp_fc_status_t;
 
 /**
@@ -220,15 +168,15 @@ typedef enum {
  * chybu; pro textový popis slouží isotp_status_str().
  */
 typedef enum {
-    ISOTP_OK             = 0,   /**< Úspěch. */
-    ISOTP_ERR_TIMEOUT,          /**< Vypršel timeout N_Bs nebo N_Cr. */
-    ISOTP_ERR_OVERFLOW,         /**< FF_DL přesahuje ISOTP_MAX_PAYLOAD. */
-    ISOTP_ERR_SEQUENCE,         /**< Chybné sekvenční číslo (SN) u CF. */
-    ISOTP_ERR_UNEXPECTED,       /**< Neočekávaný typ PCI rámce. */
-    ISOTP_ERR_CAN_TX,           /**< Selhání twai_transmit(). */
-    ISOTP_ERR_CAN_RX,           /**< Selhání twai_receive(). */
-    ISOTP_ERR_INVALID_ARG,      /**< NULL ukazatel nebo len mimo rozsah. */
-    ISOTP_ERR_NOT_INITIALIZED   /**< Nebyl zavolán isotp_init(). */
+  ISOTP_OK = 0,             /**< Úspěch. */
+  ISOTP_ERR_TIMEOUT,        /**< Vypršel timeout N_Bs nebo N_Cr. */
+  ISOTP_ERR_OVERFLOW,       /**< FF_DL přesahuje ISOTP_MAX_PAYLOAD. */
+  ISOTP_ERR_SEQUENCE,       /**< Chybné sekvenční číslo (SN) u CF. */
+  ISOTP_ERR_UNEXPECTED,     /**< Neočekávaný typ PCI rámce. */
+  ISOTP_ERR_CAN_TX,         /**< Selhání twai_transmit(). */
+  ISOTP_ERR_CAN_RX,         /**< Selhání twai_receive(). */
+  ISOTP_ERR_INVALID_ARG,    /**< NULL ukazatel nebo len mimo rozsah. */
+  ISOTP_ERR_NOT_INITIALIZED /**< Nebyl zavolán isotp_init(). */
 } isotp_status_t;
 
 /**
@@ -241,10 +189,10 @@ typedef enum {
  * Příklad: pro ECM odpovídající na 0x7E8 bude rx_id = 0x7E8.
  */
 typedef struct {
-    uint32_t  rx_id;                        /**< Zdrojové CAN ID (0x7E8..0x7EF). */
-    uint8_t   data[ISOTP_MAX_PAYLOAD];      /**< Poskládaný payload odpovědi. */
-    uint16_t  len;                          /**< Skutečná délka payloadu. */
-    bool      valid;                        /**< true = úspěšně přijato. */
+  uint32_t rx_id;                  /**< Zdrojové CAN ID (0x7E8..0x7EF). */
+  uint8_t data[ISOTP_MAX_PAYLOAD]; /**< Poskládaný payload odpovědi. */
+  uint16_t len;                    /**< Skutečná délka payloadu. */
+  bool valid;                      /**< true = úspěšně přijato. */
 } isotp_response_t;
 
 /**
@@ -259,9 +207,9 @@ typedef struct {
  * alespoň jedna platná odpověď).
  */
 typedef struct {
-    isotp_response_t  responses[ISOTP_MAX_ECU_RESPONSES];
-    uint8_t           count;                /**< Počet ECU, které odpověděly. */
-    isotp_status_t    status;               /**< Celkový výsledek operace. */
+  isotp_response_t responses[ISOTP_MAX_ECU_RESPONSES];
+  uint8_t count;         /**< Počet ECU, které odpověděly. */
+  isotp_status_t status; /**< Celkový výsledek operace. */
 } isotp_result_t;
 
 /* ========================================================================= */
@@ -346,12 +294,10 @@ void isotp_set_log_level(isotp_log_level_t level);
  *   }
  * @endcode
  */
-isotp_status_t isotp_transaction(
-    uint32_t tx_id, uint32_t rx_id,
-    const uint8_t *request, uint8_t req_len,
-    uint8_t *response, uint16_t *resp_len,
-    uint32_t timeout_ms
-);
+isotp_status_t isotp_transaction(uint32_t tx_id, uint32_t rx_id,
+                                 const uint8_t *request, uint8_t req_len,
+                                 uint8_t *response, uint16_t *resp_len,
+                                 uint32_t timeout_ms);
 
 /**
  * @brief Broadcast transakce: pošle na 0x7DF a sesbírá odpovědi všech ECU.
@@ -380,20 +326,19 @@ isotp_status_t isotp_transaction(
  * @code
  *   uint8_t req[] = { 0x09, 0x02 };  // Mode 09 PID 02 — VIN
  *   isotp_result_t result;
- *   if (isotp_transaction_broadcast(req, sizeof(req), &result, 500) == ISOTP_OK) {
- *       for (uint8_t i = 0; i < result.count; i++) {
- *           if (result.responses[i].valid) {
+ *   if (isotp_transaction_broadcast(req, sizeof(req), &result, 500) ==
+ * ISOTP_OK) { for (uint8_t i = 0; i < result.count; i++) { if
+ * (result.responses[i].valid) {
  *               // ECU result.responses[i].rx_id odpověděla
  *           }
  *       }
  *   }
  * @endcode
  */
-isotp_status_t isotp_transaction_broadcast(
-    const uint8_t *request, uint8_t req_len,
-    isotp_result_t *result,
-    uint32_t timeout_ms
-);
+isotp_status_t isotp_transaction_broadcast(const uint8_t *request,
+                                           uint8_t req_len,
+                                           isotp_result_t *result,
+                                           uint32_t timeout_ms);
 
 /**
  * @brief Vrací textový (human-readable) popis návratového kódu.
@@ -404,6 +349,28 @@ isotp_status_t isotp_transaction_broadcast(
  * @return Ukazatel na statický řetězec (není třeba uvolňovat).
  */
 const char *isotp_status_str(isotp_status_t status);
+
+/*
+ * [NEAKTIVNÍ — multi-frame TX není v aktuální verzi potřeba pro OBD-II]
+ *
+ * @brief Odešle ISO-TP zprávu libovolné délky (SF nebo FF+CF).
+ *
+ * Pokud je `len` <= 7, chová se identicky jako isotp_send_sf().
+ * Pokud je `len` > 7 a <= ISOTP_MAX_PAYLOAD, provede sekvenci:
+ *   1. Odešle First Frame (FF) s FF_DL = len.
+ *   2. Čeká na Flow Control (FC) od přijímače, timeout N_Bs.
+ *   3. Podle přijatého FC (CTS / WAIT / OVFLW) odesílá Consecutive
+ *      Frames (CF) s dodržením STmin a BlockSize.
+ *
+ * @param tx_id     CAN ID pro odeslání (napr. 0x7E0)
+ * @param rx_id     CAN ID, odkud čekáme FC (napr. 0x7E8)
+ * @param data      Ukazatel na celý payload
+ * @param len       Délka payloadu v bajtech (1 .. ISOTP_MAX_PAYLOAD)
+ * @return ISOTP_OK při úspěchu, jinak kód chyby
+ *
+ * isotp_status_t isotp_send(uint32_t tx_id, uint32_t rx_id,
+ *                           const uint8_t *data, uint16_t len);
+ */
 
 #ifdef __cplusplus
 }
