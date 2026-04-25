@@ -69,6 +69,7 @@
 #include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "secrets.h"   /* WS_AUTH_TOKEN_MAX pro pole token[] */
 
 #ifdef __cplusplus
 extern "C" {
@@ -98,7 +99,7 @@ extern "C" {
  * pripade je nutne tuto hodnotu zvysit a zaroven zkontrolovat velikost
  * FreeRTOS fronty (viz obd_response_msg_t).
  */
-#define WS_RESPONSE_JSON_MAX    1024
+#define WS_RESPONSE_JSON_MAX    2048
 
 /**
  * Maximalni pocet PIDu v jednom hromadnem pozadavku (get_pids / start_stream).
@@ -120,6 +121,13 @@ extern "C" {
  */
 #define WS_MAX_PIDS_PER_REQUEST 16
 
+/**
+ * Maximalni pocet PIDu, pro ktere stream posila rozsirena diagnosticka
+ * metadata (raw bajty, ECU ID, status). Drzime stejny limit jako UI Inspector,
+ * aby se stream JSON bezpečně vesel do WS_RESPONSE_JSON_MAX.
+ */
+#define WS_MAX_DIAG_PIDS        4
+
 /* ========================================================================= */
 /*  Typy prikazu (vycet prikazu)                                             */
 /* ========================================================================= */
@@ -138,7 +146,9 @@ extern "C" {
  *   - Mode 03: CMD_GET_DTC
  *   - Mode 04: CMD_CLEAR_DTC
  *   - Mode 07: CMD_GET_PENDING_DTC
- *   - Mode 09: CMD_GET_VIN, CMD_GET_ECU_NAME, CMD_GET_CAL_ID
+ *   - Mode 09: CMD_GET_SUPPORTED_INFOTYPES, CMD_GET_VIN, CMD_GET_ECU_NAME,
+ *              CMD_GET_CAL_ID, CMD_GET_CVN, CMD_GET_IPT
+ *   - Mode 0A: CMD_GET_PERMANENT_DTC
  *   - Bez OBD: CMD_PING (nevyzaduje CAN komunikaci)
  *   - Ridici:  CMD_INIT, CMD_START_STREAM, CMD_STOP_STREAM
  */
@@ -153,6 +163,14 @@ typedef enum {
                                  {"cmd":"ping","status":"pong"}.
                                  Nepouziva OBD vrstvu — odpoved se generuje
                                  primo v ws_handle_incoming() na Core 0. */
+
+    CMD_TRANSPORT_INIT,     /**< Inicializuje pouze CAN/ISO-TP transport.
+                                 Neprovadi PID $00 discovery a neodemkne
+                                 streaming. JSON: {"cmd":"transport_init"} */
+
+    CMD_PID00_PROBE,        /**< Functional probe Mode 01 PID $00 na 0x7DF.
+                                 Vraci vsechny odpovedi ECU vcetne rx_id.
+                                 JSON: {"cmd":"pid00_probe"} */
 
     CMD_INIT,               /**< Inicializace OBD spojeni. Provede
                                  obd2_init() pro nastaveni CAN sbernice
@@ -210,6 +228,13 @@ typedef enum {
                                  JSON: {"cmd":"get_pending_dtc"}
                                  Odpoved: stejny format jako CMD_GET_DTC. */
 
+    CMD_GET_MODE06_MONITOR, /**< Raw cteni Mode 06 OBDMID/TID monitoru.
+                                 JSON: {"cmd":"get_mode06_monitor","mid":1} */
+
+    CMD_GET_PERMANENT_DTC,  /**< Cteni permanentnich DTC v rezimu Mode 0A.
+                                 JSON: {"cmd":"get_permanent_dtc"}
+                                 Odpoved: stejny format jako CMD_GET_DTC. */
+
     CMD_CLEAR_DTC,          /**< Smazani vsech DTC a resetovani MIL
                                  (kontrolka motoru) v rezimu Mode 04.
                                  POZOR: toto trvale smaze ulozene zavady
@@ -256,19 +281,50 @@ typedef enum {
                                  Odpoved: {"cmd":"get_cal_id",
                                  "cal_id":"...","status":"ok"} */
 
-    CMD_START_STREAM,       /**< Spusteni periodickeho cteni vybranych PIDu
-                                 (streaming rezim). OBD task na Core 1
-                                 opakuje cteni v zadanem intervalu a posilá
-                                 vysledky jako broadcast vsem pripojenym
-                                 klientum.
+    CMD_GET_SUPPORTED_INFOTYPES, /**< Cteni Mode 09 InfoType $00.
+                                 Vraci podporovane InfoType per ECU.
+                                 JSON: {"cmd":"get_supported_infotypes"} */
+
+    CMD_GET_MODE09_INFO,    /**< Generic read-only cteni libovolneho Mode 09
+                                 InfoType. JSON:
+                                 {"cmd":"get_mode09_info","infotype":6} */
+
+    CMD_GET_CVN,            /**< Cteni CVN v rezimu Mode 09, InfoType 0x06.
+                                 JSON: {"cmd":"get_cvn"} */
+
+    CMD_GET_IPT,            /**< Cteni IPT v rezimu Mode 09, InfoType 0x08
+                                 nebo 0x0B. JSON:
+                                 {"cmd":"get_ipt","infotype":8} */
+
+    CMD_GET_MONITOR_STATUS_ALL, /**< Cteni stavu readiness monitoru ze vsech ECU
+                                 pres broadcast (Mode 01 PID 0x01).
+                                 Vraci per-ECU seznam s identifikaci rx_id.
+                                 JSON: {"cmd":"get_monitor_status_all"}
+                                 Odpoved: {"cmd":"get_monitor_status_all",
+                                 "ecus":[{"id":"0x7E8","mil_on":false, ...}],
+                                 "status":"ok"} */
+
+    CMD_DISCOVER_ECUS,      /**< Detekce vsech ECU v siti pres broadcast
+                                 Mode 09 InfoType 0x0A (ECU name).
+                                 Vraci seznam vsech ECU, ktere odpovedely.
+                                 JSON: {"cmd":"discover_ecus"}
+                                 Odpoved: {"cmd":"discover_ecus",
+                                 "ecus":[{"id":"0x7E8","name":"ECM"}],
+                                 "status":"ok"} */
+
+    CMD_START_STREAM,       /**< Spusteni periodickeho cteni vybranych PIDu.
+                                 Rezim "dash" krmi hlavni UI/trip/GPS/recording,
+                                 rezim "inspector" izolovane krmi PIDs Select
+                                 vcetne raw diagnostiky.
                                  JSON: {"cmd":"start_stream",
-                                 "pids":[12,13],"interval":200}
+                                 "mode":"dash","pids":[12,13],
+                                 "interval_ms":200}
                                  -- interval je v milisekundach (min. 50 ms)
                                  Odpoved na spusteni: {"cmd":"start_stream",
-                                 "status":"ok"}
+                                 "status":"ok","mode":"dash"}
                                  Nasledne periodicke odpovedi:
-                                 {"cmd":"stream","d":{"12":875.25,"13":45},
-                                 "ts":12345} */
+                                 {"cmd":"stream","mode":"dash",
+                                 "d":{"12":875.25,"13":45},"ts":12345} */
 
     CMD_STOP_STREAM,        /**< Zastaveni aktivniho streamu. OBD task
                                  prestane periodicke cteni a vrati se
@@ -276,7 +332,24 @@ typedef enum {
                                  JSON: {"cmd":"stop_stream"}
                                  Odpoved: {"cmd":"stop_stream",
                                  "status":"ok"} */
+
+    CMD_MANUAL_QUERY        /**< Manualni dotaz pro diagnosticky terminal.
+                                 Umoznuje poslat libovolny PID v bezpecnych
+                                 sluzbach (01, 09) a videt surova data.
+                                 JSON: {"cmd":"manual_query","service":1,"pid":12}
+                                 Odpoved obsahuje HEX payload a interpretaci. */
 } ws_cmd_t;
+
+/**
+ * Rezim periodickeho streamu.
+ *
+ * DASH rezim krmi hlavni ukazatele, trip/statistiky, recording a GPS OBD
+ * snapshoty. INSPECTOR rezim je izolovany diagnosticky stream pro PIDs Select.
+ */
+typedef enum {
+    WS_STREAM_MODE_DASH = 0,
+    WS_STREAM_MODE_INSPECTOR = 1
+} ws_stream_mode_t;
 
 /* ========================================================================= */
 /*  Struktury zprav pro FreeRTOS fronty                                      */
@@ -315,8 +388,11 @@ typedef struct {
                                                  smerovani odpovedi. Prideluje
                                                  se pri navazani spojeni
                                                  (onConnect callback). */
+    uint8_t   service;                      /**< Service ID (Mode) pro prikaz
+                                                 CMD_MANUAL_QUERY (napr. 0x01). */
     uint8_t   pid;                          /**< Cislo PIDu pro prikazy
-                                                 CMD_GET_PID a CMD_GET_FREEZE_FRAME.
+                                                 CMD_GET_PID, CMD_GET_FREEZE_FRAME
+                                                 a CMD_MANUAL_QUERY.
                                                  Rozsah 0x00-0xFF dle normy
                                                  SAE J1979 / ISO 15031-5. */
     uint8_t   pids[WS_MAX_PIDS_PER_REQUEST]; /**< Pole PIDu pro hromadne
@@ -324,9 +400,13 @@ typedef struct {
                                                  a CMD_START_STREAM.
                                                  Platnych je pouze prvnich
                                                  pid_count prvku. */
+    uint8_t   diag_pids[WS_MAX_DIAG_PIDS];  /**< PIDy, pro ktere stream vraci
+                                                 rozsirena diagnosticka metadata. */
     uint8_t   pid_count;                    /**< Pocet platnych PIDu v poli
                                                  pids[]. Musi byt v rozsahu
                                                  0 az WS_MAX_PIDS_PER_REQUEST. */
+    uint8_t   diag_pid_count;               /**< Pocet platnych PIDu v diag_pids[]. */
+    ws_stream_mode_t stream_mode;           /**< Rezim streamu (DASH/INSPECTOR). */
     uint16_t  interval_ms;                  /**< Interval periodickeho cteni
                                                  pro CMD_START_STREAM
                                                  v milisekundach. Minimalni
@@ -334,6 +414,19 @@ typedef struct {
                                                  (omezeno rychlosti CAN
                                                  sbernice). Ignoruje se
                                                  u ostatnich prikazu. */
+    bool      hb;                           /**< Heartbeat priznak. */
+    char      token[WS_AUTH_TOKEN_MAX];      /**< Autentizacni token pro
+                                                 destruktivni prikazy
+                                                 (aktualne pouze CMD_CLEAR_DTC).
+                                                 Klient ho posila v JSON
+                                                 poli "token". U ostatnich
+                                                 prikazu zustava prazdny
+                                                 (memset 0 v ws_handle_incoming).
+                                                 Kontrola proti WS_AUTH_TOKEN
+                                                 probiha v handleru prikazu,
+                                                 nikoli pri parsovani, aby
+                                                 stejny token mohli pouzivat
+                                                 i budouci destruktivni prikazy. */
 } obd_request_msg_t;
 
 /**
@@ -352,9 +445,9 @@ typedef struct {
  *     (pouziva se pro streaming odpovedi, kde vsichni klienti
  *     dostavaji stejna data)
  *
- * Velikost struktury je priblizne 1028 B (4 B client_id + 1024 B buffer):
+ * Velikost struktury je priblizne 2052 B (4 B client_id + 2048 B buffer):
  *   - Je vyrazne vetsi nez request zprava kvuli JSON bufferu.
- *   - FreeRTOS fronta s kapacitou 10 prvku zabere ~10 KB RAM.
+ *   - FreeRTOS fronta s kapacitou 10 prvku zabere ~20 KB RAM.
  *   - Na ESP32 s 320 KB SRAM je to podstatna cast, proto se kapacita
  *     fronty nenastavuje zbytecne vysoko.
  *
@@ -545,8 +638,11 @@ void ws_process_stream_tick(obd_response_msg_t *resp);
  */
 typedef struct {
     bool     active;                            /**< Stream aktivni? */
+    ws_stream_mode_t mode;                      /**< Rezim streamu */
     uint8_t  pids[WS_MAX_PIDS_PER_REQUEST];     /**< PIDy ke cteni */
+    uint8_t  diag_pids[WS_MAX_DIAG_PIDS];       /**< PIDy s diagnostikou */
     uint8_t  pid_count;                         /**< Pocet PIDu */
+    uint8_t  diag_pid_count;                    /**< Pocet diagnostickych PIDu */
     uint16_t interval_ms;                       /**< Interval mezi cykly (ms) */
 } ws_stream_cfg_t;
 
