@@ -38,26 +38,66 @@ extern "C" {
 #include <math.h>
 #include "esp_system.h"
 
-/* ---- Konfigurace CAN pinu (musi odpovídat hodnotam v .ino) ---- */
-/*
- * Vychozi hodnoty TX=12, RX=14 odpovidaji typickemu zapojeni
- * ESP32 s SN65HVD230 CAN transceiverem. Pokud .ino definuje
- * jine piny (napr. pri pouziti jineho breakout boardu),
- * tyto #define se preskoci diky #ifndef.
- *
- * CAN_BAUDRATE 500000 = 500 kbit/s — standardni rychlost
- * pro OBD-II diagnostiku (ISO 15765-4). Nektere vozidla
- * pouzivaji 250 kbit/s, ale 500k je bezne pro osobni auta.
- */
-#ifndef CAN_TX_PIN
-#define CAN_TX_PIN   12
-#endif
-#ifndef CAN_RX_PIN
-#define CAN_RX_PIN   14
-#endif
-#ifndef CAN_BAUDRATE
-#define CAN_BAUDRATE 500000
-#endif
+#include "config.h"
+
+static void _ws_format_pid_raw_hex(const obd2_pid_decoded_t &decoded,
+                                   char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) return;
+    size_t off = 0;
+    int written = snprintf(out, out_len, "0x");
+    if (written < 0) {
+        out[0] = '\0';
+        return;
+    }
+    off = (size_t)written;
+
+    for (uint8_t i = 0; i < decoded.raw_data_len; i++) {
+        if (off + 3 > out_len) break;
+        written = snprintf(out + off, out_len - off, "%02X", decoded.raw_data[i]);
+        if (written < 0) break;
+        off += (size_t)written;
+    }
+}
+
+static const char *_ws_stream_mode_str(ws_stream_mode_t mode)
+{
+    return (mode == WS_STREAM_MODE_INSPECTOR) ? "inspector" : "dash";
+}
+
+static bool _ws_diag_pid_enabled(uint8_t pid, const uint8_t *diag_pids,
+                                 uint8_t diag_pid_count)
+{
+    for (uint8_t i = 0; i < diag_pid_count; i++) {
+        if (diag_pids[i] == pid) return true;
+    }
+    return false;
+}
+
+static void _ws_add_stream_pid_diag(JsonObject obj,
+                                    const obd2_pid_decoded_t *decoded,
+                                    obd2_status_t st)
+{
+    char tx_hex[8], rx_hex[8];
+    const obd2_init_diag_t *diag = obd2_get_init_diag();
+    snprintf(tx_hex, sizeof(tx_hex), "0x%03lX", (unsigned long)diag->last_tx_id);
+    snprintf(rx_hex, sizeof(rx_hex), "0x%03lX", (unsigned long)diag->last_rx_id);
+
+    obj["obd_status"] = obd2_status_str(st);
+    obj["isotp_status"] = isotp_status_str(diag->last_isotp_status);
+    obj["tx_id"] = tx_hex;
+    obj["rx_id"] = rx_hex;
+
+    if (decoded != NULL) {
+        char raw_hex[2 + OBD2_PID_MAX_DATA_BYTES * 2 + 1];
+        _ws_format_pid_raw_hex(*decoded, raw_hex, sizeof(raw_hex));
+        obj["raw"] = raw_hex;
+        obj["raw_len"] = decoded->raw_data_len;
+    } else {
+        obj["raw"] = "0x";
+        obj["raw_len"] = 0;
+    }
+}
 
 /* ========================================================================= */
 /*  Interni stav modulu                                                      */
@@ -108,7 +148,7 @@ volatile bool _obd_initialized = false;
  * v ws_commands.cpp pres extern deklaraci.
  */
 /* Typ ws_stream_cfg_t je definovan v ws_handler.h */
-volatile ws_stream_cfg_t _stream_cfg = { false, {0}, 0, 200 };
+volatile ws_stream_cfg_t _stream_cfg = { false, WS_STREAM_MODE_DASH, {0}, {0}, 0, 0, 200 };
 
 /* ========================================================================= */
 /*  Pomocne funkce — mapovani cmd retezce na enum                            */
@@ -137,20 +177,31 @@ static ws_cmd_t _ws_parse_cmd(const char *cmd_str)
     if (cmd_str == NULL) return CMD_UNKNOWN;
 
     if (strcmp(cmd_str, "ping") == 0)               return CMD_PING;
+    if (strcmp(cmd_str, "transport_init") == 0)     return CMD_TRANSPORT_INIT;
+    if (strcmp(cmd_str, "pid00_probe") == 0)        return CMD_PID00_PROBE;
     if (strcmp(cmd_str, "init") == 0)                return CMD_INIT;
     if (strcmp(cmd_str, "get_pid") == 0)             return CMD_GET_PID;
     if (strcmp(cmd_str, "get_pids") == 0)            return CMD_GET_PIDS;
     if (strcmp(cmd_str, "get_supported_pids") == 0)  return CMD_GET_SUPPORTED_PIDS;
     if (strcmp(cmd_str, "get_dtc") == 0)             return CMD_GET_DTC;
     if (strcmp(cmd_str, "get_pending_dtc") == 0)     return CMD_GET_PENDING_DTC;
+    if (strcmp(cmd_str, "get_mode06_monitor") == 0)  return CMD_GET_MODE06_MONITOR;
+    if (strcmp(cmd_str, "get_permanent_dtc") == 0)   return CMD_GET_PERMANENT_DTC;
     if (strcmp(cmd_str, "clear_dtc") == 0)           return CMD_CLEAR_DTC;
     if (strcmp(cmd_str, "get_vin") == 0)             return CMD_GET_VIN;
     if (strcmp(cmd_str, "get_monitor_status") == 0)  return CMD_GET_MONITOR_STATUS;
     if (strcmp(cmd_str, "get_freeze_frame") == 0)   return CMD_GET_FREEZE_FRAME;
     if (strcmp(cmd_str, "get_ecu_name") == 0)       return CMD_GET_ECU_NAME;
     if (strcmp(cmd_str, "get_cal_id") == 0)         return CMD_GET_CAL_ID;
+    if (strcmp(cmd_str, "get_supported_infotypes") == 0) return CMD_GET_SUPPORTED_INFOTYPES;
+    if (strcmp(cmd_str, "get_mode09_info") == 0)    return CMD_GET_MODE09_INFO;
+    if (strcmp(cmd_str, "get_cvn") == 0)            return CMD_GET_CVN;
+    if (strcmp(cmd_str, "get_ipt") == 0)            return CMD_GET_IPT;
+    if (strcmp(cmd_str, "get_monitor_status_all") == 0) return CMD_GET_MONITOR_STATUS_ALL;
+    if (strcmp(cmd_str, "discover_ecus") == 0)      return CMD_DISCOVER_ECUS;
     if (strcmp(cmd_str, "start_stream") == 0)       return CMD_START_STREAM;
     if (strcmp(cmd_str, "stop_stream") == 0)         return CMD_STOP_STREAM;
+    if (strcmp(cmd_str, "manual_query") == 0)        return CMD_MANUAL_QUERY;
 
     return CMD_UNKNOWN;
 }
@@ -165,7 +216,7 @@ static ws_cmd_t _ws_parse_cmd(const char *cmd_str)
  * Pouziva se pri OBD chybach (timeout, negative response, atd.).
  * Vysledny format: {"status":"error", "error":"TIMEOUT", "message":"popis"}
  *
- * Pri negativni odpovedi z ECU (OBD2_ERR_NEGATIVE_RESP) pridame navic
+ * Pri negativni odpovedi z ECU (OBD2_ERR_NEGATIVE_RESP) se přidá navic
  * NRC detail — numericky kod a jeho textovy popis. Priklad:
  *   {"status":"error", "error":"NEGATIVE_RESP", "nrc_code":0x12,
  *    "nrc_name":"subFunctionNotSupported"}
@@ -185,7 +236,7 @@ void _ws_set_error(JsonDocument &doc, obd2_status_t obd_st,
         doc["message"] = message;
     }
 
-    /* Pri negativni odpovedi z ECU pridame NRC detail (kod + popis) */
+    /* Pri negativni odpovedi z ECU se přidá NRC detail (kod + popis) */
     if (obd_st == OBD2_ERR_NEGATIVE_RESP) {
         obd2_nrc_info_t nrc = obd2_get_last_nrc();
         doc["nrc_code"] = nrc.nrc;
@@ -230,19 +281,29 @@ void _ws_serialize(JsonDocument &doc, obd_response_msg_t *resp)
  */
 
 void _ws_cmd_ping(const obd_request_msg_t *req, obd_response_msg_t *resp);
+void _ws_cmd_transport_init(const obd_request_msg_t *req, obd_response_msg_t *resp);
+void _ws_cmd_pid00_probe(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_init(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_get_pid(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_get_pids(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_get_supported_pids(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_get_dtc(const obd_request_msg_t *req, obd_response_msg_t *resp);
+void _ws_cmd_get_mode06_monitor(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_clear_dtc(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_get_vin(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_get_monitor_status(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_get_freeze_frame(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_get_ecu_name(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_get_cal_id(const obd_request_msg_t *req, obd_response_msg_t *resp);
+void _ws_cmd_get_supported_infotypes(const obd_request_msg_t *req, obd_response_msg_t *resp);
+void _ws_cmd_get_mode09_info(const obd_request_msg_t *req, obd_response_msg_t *resp);
+void _ws_cmd_get_cvn(const obd_request_msg_t *req, obd_response_msg_t *resp);
+void _ws_cmd_get_ipt(const obd_request_msg_t *req, obd_response_msg_t *resp);
+void _ws_cmd_get_monitor_status_all(const obd_request_msg_t *req, obd_response_msg_t *resp);
+void _ws_cmd_discover_ecus(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_start_stream(const obd_request_msg_t *req, obd_response_msg_t *resp);
 void _ws_cmd_stop_stream(const obd_request_msg_t *req, obd_response_msg_t *resp);
+void _ws_cmd_manual_query(const obd_request_msg_t *req, obd_response_msg_t *resp);
 
 /* ========================================================================= */
 /*  Verejne API                                                              */
@@ -321,9 +382,9 @@ void ws_handle_incoming(uint32_t client_id, const char *payload, size_t length)
 
     if (err) {
         /*
-         * Nevalidni JSON — odesleme chybu primo do response fronty
-         * (nemusime zatezovat OBD task).
-         * Pouzivame static aby se 1028B struktura neukladala na stack
+         * Nevalidni JSON — odesle se chyba primo do response fronty
+         * (nemusí se zatezovat OBD task).
+         * Používá se static aby se 1028B struktura neukladala na stack
          * async TCP callbacku (omezeny stack ~4-8 KB).
          */
         static obd_response_msg_t resp;
@@ -350,8 +411,8 @@ void ws_handle_incoming(uint32_t client_id, const char *payload, size_t length)
     }
 
     /*
-     * CMD_PING nepotrebuje OBD task — zpracujeme primo zde (Core 0)
-     * a dame do response fronty. Vsechny ostatni prikazy jdou
+     * CMD_PING nepotrebuje OBD task — zpracuje se primo zde (Core 0)
+     * a vkládá se do response fronty. Vsechny ostatni prikazy jdou
      * do request fronty pro OBD task (Core 1).
      */
     if (cmd == CMD_PING) {
@@ -359,6 +420,8 @@ void ws_handle_incoming(uint32_t client_id, const char *payload, size_t length)
         memset(&req_msg, 0, sizeof(req_msg));
         req_msg.cmd = CMD_PING;
         req_msg.client_id = client_id;
+        req_msg.hb = doc["hb"] | false; // Pridano: vytazeni hb priznaku pro ping
+        
         static obd_response_msg_t resp;
         resp.client_id = client_id;
         _ws_cmd_ping(&req_msg, &resp);
@@ -371,6 +434,7 @@ void ws_handle_incoming(uint32_t client_id, const char *payload, size_t length)
     memset(&req_msg, 0, sizeof(req_msg));
     req_msg.cmd = cmd;
     req_msg.client_id = client_id;
+    req_msg.hb = doc["hb"] | false;
 
     /* Extrahovani parametru podle typu prikazu */
     switch (cmd) {
@@ -392,15 +456,81 @@ void ws_handle_incoming(uint32_t client_id, const char *payload, size_t length)
         req_msg.pid = (uint8_t)doc["pid"].as<int>();
         break;
 
+    case CMD_GET_MODE06_MONITOR: {
+        int mid = doc["mid"] | -1;
+        if (mid < 0) mid = doc["pid"] | 0;
+        req_msg.pid = (uint8_t)mid;
+        break;
+    }
+
+    case CMD_GET_MODE09_INFO: {
+        int infotype = doc["infotype"] | -1;
+        if (infotype < 0) infotype = doc["pid"] | OBD2_INFOTYPE_SUPPORTED;
+        req_msg.pid = (uint8_t)infotype;
+        break;
+    }
+
+    case CMD_GET_IPT: {
+        int infotype = doc["infotype"] | -1;
+        if (infotype < 0) infotype = doc["pid"] | OBD2_INFOTYPE_IPT;
+        req_msg.pid = (uint8_t)infotype;
+        if (req_msg.pid != OBD2_INFOTYPE_IPT &&
+            req_msg.pid != OBD2_INFOTYPE_IPT_COMPRESSION) {
+            req_msg.pid = OBD2_INFOTYPE_IPT;
+        }
+        break;
+    }
+
     case CMD_START_STREAM: {
         /* Parsovani PIDu a intervalu pro stream */
+        const char *mode_str = doc["mode"] | "dash";
+        req_msg.stream_mode = (strcmp(mode_str, "inspector") == 0)
+                              ? WS_STREAM_MODE_INSPECTOR
+                              : WS_STREAM_MODE_DASH;
+
+        uint8_t max_stream_pids = (req_msg.stream_mode == WS_STREAM_MODE_INSPECTOR)
+                                ? WS_MAX_DIAG_PIDS
+                                : WS_MAX_PIDS_PER_REQUEST;
         JsonArray arr = doc["pids"].as<JsonArray>();
         req_msg.pid_count = 0;
         for (JsonVariant v : arr) {
-            if (req_msg.pid_count >= WS_MAX_PIDS_PER_REQUEST) break;
+            if (req_msg.pid_count >= max_stream_pids) break;
             req_msg.pids[req_msg.pid_count++] = (uint8_t)v.as<int>();
         }
+        JsonArray diag_arr = doc["diag_pids"].as<JsonArray>();
+        req_msg.diag_pid_count = 0;
+        for (JsonVariant v : diag_arr) {
+            if (req_msg.diag_pid_count >= WS_MAX_DIAG_PIDS) break;
+            req_msg.diag_pids[req_msg.diag_pid_count++] = (uint8_t)v.as<int>();
+        }
+        if (req_msg.stream_mode == WS_STREAM_MODE_INSPECTOR &&
+            req_msg.diag_pid_count == 0) {
+            for (uint8_t i = 0; i < req_msg.pid_count && i < WS_MAX_DIAG_PIDS; i++) {
+                req_msg.diag_pids[req_msg.diag_pid_count++] = req_msg.pids[i];
+            }
+        }
         req_msg.interval_ms = doc["interval_ms"] | 200;  /* vychozi 200ms */
+        break;
+    }
+
+    case CMD_CLEAR_DTC: {
+        /*
+         * Destruktivni prikaz — vyzaduje autentizacni token.
+         * Token se kopiruje z JSON do req_msg.token (max. WS_AUTH_TOKEN_MAX-1
+         * znaku + '\0'). Vlastni overeni probiha az v handleru
+         * _ws_cmd_clear_dtc(), aby byla logika autentizace u prikazu,
+         * ne v univerzalnim parseru.
+         */
+        const char *tok = doc["token"] | "";
+        strncpy(req_msg.token, tok, WS_AUTH_TOKEN_MAX - 1);
+        req_msg.token[WS_AUTH_TOKEN_MAX - 1] = '\0';
+        break;
+    }
+
+    case CMD_MANUAL_QUERY: {
+        /* Parsovani Service ID a PIDu pro manualni dotaz */
+        req_msg.service = (uint8_t)(doc["service"] | 1);
+        req_msg.pid = (uint8_t)(doc["pid"] | 0);
         break;
     }
 
@@ -411,7 +541,7 @@ void ws_handle_incoming(uint32_t client_id, const char *payload, size_t length)
 
     /*
      * Zarazeni do request fronty. Timeout 100ms — pokud je fronta plna
-     * (OBD task nestihá), odesleme chybovou odpoved klientovi.
+     * (OBD task nestihá), odešle se chybova odpoved klientovi.
      */
     if (xQueueSend(_req_queue, &req_msg, pdMS_TO_TICKS(100)) != pdTRUE) {
         static obd_response_msg_t resp;
@@ -459,6 +589,12 @@ void ws_process_obd_command(const obd_request_msg_t *req,
     case CMD_PING:
         _ws_cmd_ping(req, resp);
         break;
+    case CMD_TRANSPORT_INIT:
+        _ws_cmd_transport_init(req, resp);
+        break;
+    case CMD_PID00_PROBE:
+        _ws_cmd_pid00_probe(req, resp);
+        break;
     case CMD_INIT:
         _ws_cmd_init(req, resp);
         break;
@@ -473,7 +609,11 @@ void ws_process_obd_command(const obd_request_msg_t *req,
         break;
     case CMD_GET_DTC:
     case CMD_GET_PENDING_DTC:
+    case CMD_GET_PERMANENT_DTC:
         _ws_cmd_get_dtc(req, resp);
+        break;
+    case CMD_GET_MODE06_MONITOR:
+        _ws_cmd_get_mode06_monitor(req, resp);
         break;
     case CMD_CLEAR_DTC:
         _ws_cmd_clear_dtc(req, resp);
@@ -493,11 +633,32 @@ void ws_process_obd_command(const obd_request_msg_t *req,
     case CMD_GET_CAL_ID:
         _ws_cmd_get_cal_id(req, resp);
         break;
+    case CMD_GET_SUPPORTED_INFOTYPES:
+        _ws_cmd_get_supported_infotypes(req, resp);
+        break;
+    case CMD_GET_MODE09_INFO:
+        _ws_cmd_get_mode09_info(req, resp);
+        break;
+    case CMD_GET_CVN:
+        _ws_cmd_get_cvn(req, resp);
+        break;
+    case CMD_GET_IPT:
+        _ws_cmd_get_ipt(req, resp);
+        break;
+    case CMD_GET_MONITOR_STATUS_ALL:
+        _ws_cmd_get_monitor_status_all(req, resp);
+        break;
+    case CMD_DISCOVER_ECUS:
+        _ws_cmd_discover_ecus(req, resp);
+        break;
     case CMD_START_STREAM:
         _ws_cmd_start_stream(req, resp);
         break;
     case CMD_STOP_STREAM:
         _ws_cmd_stop_stream(req, resp);
+        break;
+    case CMD_MANUAL_QUERY:
+        _ws_cmd_manual_query(req, resp);
         break;
     default:
         snprintf(resp->json, WS_RESPONSE_JSON_MAX,
@@ -580,22 +741,165 @@ void ws_process_stream_tick(obd_response_msg_t *resp)
      */
     JsonDocument doc;
     doc["cmd"] = "stream";
+    ws_stream_mode_t mode = _stream_cfg.mode;
+    uint8_t pid_count = _stream_cfg.pid_count;
+    if (pid_count > WS_MAX_PIDS_PER_REQUEST) pid_count = WS_MAX_PIDS_PER_REQUEST;
+
+    uint8_t pids[WS_MAX_PIDS_PER_REQUEST];
+    for (uint8_t i = 0; i < pid_count; i++) {
+        pids[i] = _stream_cfg.pids[i];
+    }
+
+    uint8_t diag_pid_count = _stream_cfg.diag_pid_count;
+    if (diag_pid_count > WS_MAX_DIAG_PIDS) diag_pid_count = WS_MAX_DIAG_PIDS;
+    uint8_t diag_pids[WS_MAX_DIAG_PIDS];
+    for (uint8_t i = 0; i < diag_pid_count; i++) {
+        diag_pids[i] = _stream_cfg.diag_pids[i];
+    }
+
+    doc["mode"] = _ws_stream_mode_str(mode);
     JsonObject data = doc["d"].to<JsonObject>();
+    JsonObject diag_data;
+    if (mode == WS_STREAM_MODE_INSPECTOR) {
+        diag_data = doc["diag"].to<JsonObject>();
+    }
 
     uint8_t ok_count = 0;
-    for (uint8_t i = 0; i < _stream_cfg.pid_count; i++) {
-        uint8_t pid = _stream_cfg.pids[i];
+    for (uint8_t i = 0; i < pid_count; i++) {
+        uint8_t pid = pids[i];
+        bool want_diag = (mode == WS_STREAM_MODE_INSPECTOR) &&
+                         _ws_diag_pid_enabled(pid, diag_pids, diag_pid_count);
+
+        /* Klic je PID cislo jako decimalni string (napr. "12" pro 0x0C).
+         * Frontend si format prevadi pres pidToInt(). */
+        char key[4];
+        snprintf(key, sizeof(key), "%u", pid);
+
+        const obd2_pid_desc_t *desc = obd2_get_pid_descriptor(pid);
+
+        /*
+         * RAW PIDy (komplexni diesel PIDy bez dekoderu) — cteme pouze raw
+         * bajty jednim CAN requestem. Predtim se volalo obd2_get_pid() +
+         * obd2_get_pid_raw() = 2 CAN requesty na jeden PID, coz
+         * zdvojnasovalo CAN provoz a mohlo zpusobit nekonzistenci dat.
+         */
+        if (desc && desc->format == OBD2_FMT_RAW) {
+            obd2_pid_raw_t raw;
+            obd2_status_t st = obd2_get_pid_raw(pid, &raw);
+            if (st == OBD2_OK && raw.data_len > 0) {
+                ok_count++;
+                JsonArray arr = data[key].to<JsonArray>();
+                for (uint8_t j = 0; j < raw.data_len; j++) {
+                    char hex[6];
+                    snprintf(hex, sizeof(hex), "0x%02X", raw.data[j]);
+                    arr.add(hex);
+                }
+            }
+            if (want_diag) {
+                obd2_pid_decoded_t diag_decoded;
+                memset(&diag_decoded, 0, sizeof(diag_decoded));
+                if (st == OBD2_OK) {
+                    diag_decoded.raw_data_len = raw.data_len;
+                    memcpy(diag_decoded.raw_data, raw.data, raw.data_len);
+                    _ws_add_stream_pid_diag(diag_data[key].to<JsonObject>(), &diag_decoded, st);
+                } else {
+                    _ws_add_stream_pid_diag(diag_data[key].to<JsonObject>(), NULL, st);
+                }
+            }
+            continue;
+        }
+
         obd2_pid_decoded_t decoded;
         obd2_status_t st = obd2_get_pid(pid, &decoded);
 
-        if (st == OBD2_OK) {
-            /* Klic je PID cislo jako string */
-            char key[4];
-            snprintf(key, sizeof(key), "%u", pid);
-            data[key] = (double)decoded.value;
-            ok_count++;
+        if (st != OBD2_OK) {
+            if (want_diag) {
+                _ws_add_stream_pid_diag(diag_data[key].to<JsonObject>(), NULL, st);
+            }
+            continue;  /* DASH zachovava puvodni chovani: chybne PIDy se preskoci */
         }
-        /* Chybne PIDy preskocime — klient vi ktere chybi */
+
+        ok_count++;
+        if (want_diag) {
+            _ws_add_stream_pid_diag(diag_data[key].to<JsonObject>(), &decoded, st);
+        }
+
+        if (!desc) {
+            data[key] = (double)decoded.value;
+            continue;
+        }
+
+        /*
+         * Format vystupu podle typu PIDu:
+         *
+         * 1) Bitove pole / enum / config — hex string ("0xNN", "0xNNNN", "0xNNNNNNNN").
+         *    Frontend dekoduje pomoci PID_INFO[pid].vals nebo specialnich funkci
+         *    (decodeMonitorStatusVal pro $01).
+         *
+         * 2) Multi-value (O2 senzory, EGT 4-sensor, NOx) — pole floatu o velikosti
+         *    value_count (1-4). Frontend rozezna pole vs skalar pres Array.isArray().
+         *
+         * 3) Skalarni (RPM, teploty, tlaky...) — primo float.
+         */
+        switch (desc->format) {
+        case OBD2_FMT_BIT_ENCODED:
+        case OBD2_FMT_ENUM:
+        case OBD2_FMT_CONFIG: {
+            char hex[2 + OBD2_PID_MAX_DATA_BYTES * 2 + 1];
+            _ws_format_pid_raw_hex(decoded, hex, sizeof(hex));
+            data[key] = hex;
+            break;
+        }
+
+        case OBD2_FMT_SIGNED_OFFSET_1B: {
+            if (!isnan(decoded.secondary)) {
+                JsonArray arr = data[key].to<JsonArray>();
+                arr.add((double)decoded.value);
+                arr.add((double)decoded.secondary);
+            } else {
+                data[key] = (double)decoded.value;
+            }
+            break;
+        }
+
+        case OBD2_FMT_O2_CONV:
+        case OBD2_FMT_O2_WIDE_EQ_V:
+        case OBD2_FMT_O2_WIDE_EQ_I: {
+            /* O2 senzory — dvojhodnota (primary + secondary). Posilame jako pole
+             * pro symetrii s multi-sensor PIDy. */
+            JsonArray arr = data[key].to<JsonArray>();
+            arr.add((double)decoded.value);
+            if (!isnan(decoded.secondary)) arr.add((double)decoded.secondary);
+            break;
+        }
+
+        case OBD2_FMT_TEMP_4S:
+        case OBD2_FMT_NOX_4S: {
+            /* Multi-sensor: az 4 hodnoty. value_count rika kolik jich je validnich.
+             * NaN slot se posila jako null v JSON, ale ArduinoJson pro float NaN
+             * dela serializaci jako null automaticky. */
+            JsonArray arr = data[key].to<JsonArray>();
+            arr.add((double)decoded.value);
+            if (decoded.value_count >= 2) {
+                if (isnan(decoded.secondary)) arr.add(nullptr);
+                else arr.add((double)decoded.secondary);
+            }
+            if (decoded.value_count >= 3) {
+                if (isnan(decoded.extra[0])) arr.add(nullptr);
+                else arr.add((double)decoded.extra[0]);
+            }
+            if (decoded.value_count >= 4) {
+                if (isnan(decoded.extra[1])) arr.add(nullptr);
+                else arr.add((double)decoded.extra[1]);
+            }
+            break;
+        }
+
+        default:
+            /* Skalarni formaty (LINEAR_1B/2B/4B, SIGNED, ...) */
+            data[key] = (double)decoded.value;
+            break;
+        }
     }
 
     doc["ts"] = (uint32_t)millis();
