@@ -33,6 +33,7 @@ gcc $CFLAGS \
     tests/test_obd2_pids.c \
     tests/test_obd2_diag.c \
     tests/test_obd2.c \
+    tests/test_obd2_modes.c \
     tests/test_main.c \
     -lm \
     -o "$OUT"
