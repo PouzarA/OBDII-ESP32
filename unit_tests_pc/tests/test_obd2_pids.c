@@ -364,6 +364,199 @@ void test_decode_pid_secondary_short_data(void)
 }
 
 /* ========================================================================= */
+/*  Test 11b: LINEAR_4B (PID $A6 -- odometer)                                */
+/* ========================================================================= */
+
+/*
+ * Vzorec: value = ((A<<24) | (B<<16) | (C<<8) | D) * 0.1 [km]
+ * Pouziti: PID $A6 (Odometer, scaling 0.1 km / LSB).
+ *
+ * Priklad: raw = 0x000186A0 = 100000 -> 10000.0 km
+ */
+void test_decode_pid_A6_odometer_zero(void)
+{
+    uint8_t data[4] = { 0x00, 0x00, 0x00, 0x00 };
+    float v = obd2_decode_pid_value(0xA6, data, 4);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, v, FLT_TOL);
+}
+
+void test_decode_pid_A6_odometer_10000km(void)
+{
+    /* 100000 raw * 0.1 = 10000 km */
+    uint8_t data[4] = { 0x00, 0x01, 0x86, 0xA0 };
+    float v = obd2_decode_pid_value(0xA6, data, 4);
+    TEST_ASSERT_EQUAL_FLOAT(10000.0f, v, 1.0f);
+}
+
+void test_decode_pid_A6_odometer_short_data_returns_nan(void)
+{
+    /* Pouze 3 bajty - LINEAR_4B vyzaduje 4 -> NAN */
+    uint8_t data[3] = { 0x00, 0x01, 0x86 };
+    float v = obd2_decode_pid_value(0xA6, data, 3);
+    TEST_ASSERT_NAN(v);
+}
+
+/* ========================================================================= */
+/*  Test 11c: ENUM (PID $1C -- OBD standard, PID $51 -- typ paliva)          */
+/* ========================================================================= */
+
+/*
+ * Vzorec: value = A (raw bajt jako float).
+ *
+ * PID $1C (OBD standard): A=01 -> OBD II California, A=06 -> EOBD, atd.
+ * PID $51 (Fuel type):    A=01 -> Gasoline, A=04 -> Diesel, atd.
+ */
+void test_decode_pid_1C_obd_standard_eobd(void)
+{
+    uint8_t data[1] = { 0x06 };  /* EOBD */
+    float v = obd2_decode_pid_value(0x1C, data, 1);
+    TEST_ASSERT_EQUAL_FLOAT(6.0f, v, FLT_TOL);
+}
+
+void test_decode_pid_51_fuel_type_diesel(void)
+{
+    uint8_t data[1] = { 0x04 };  /* Diesel */
+    float v = obd2_decode_pid_value(0x51, data, 1);
+    TEST_ASSERT_EQUAL_FLOAT(4.0f, v, FLT_TOL);
+}
+
+/* ========================================================================= */
+/*  Test 11d: TEMP_4S (PID $78 -- EGT 4 senzory)                             */
+/* ========================================================================= */
+
+/*
+ * Format dat (9 B): A B C D E F G H I
+ *   A:    bity 0..3 = podpora senzoru 1..4
+ *   B,C:  senzor 1 = (256B+C) * 0.1 - 40 stupnu C
+ *   D,E:  senzor 2
+ *   F,G:  senzor 3
+ *   H,I:  senzor 4
+ *
+ * Primarni hodnota = senzor 1.
+ * Sekundarni hodnota = senzor 2.
+ * Senzory 3,4 -> obd2_decode_pid_extras().
+ */
+void test_decode_pid_78_temp_4s_sensor1(void)
+{
+    /* support = 0x0F (vsech 4 senzoru), senzor 1 = (0x0AF0)*0.1 - 40 = 280 - 40 = 240 stupnu */
+    uint8_t data[9] = { 0x0F, 0x0A, 0xF0,
+                              0x0A, 0xF0,
+                              0x0A, 0xF0,
+                              0x0A, 0xF0 };
+    float v = obd2_decode_pid_value(0x78, data, 9);
+    TEST_ASSERT_EQUAL_FLOAT(240.0f, v, FLT_TOL);
+}
+
+void test_decode_pid_78_temp_4s_sensor2(void)
+{
+    /* support = 0x0F, senzor 2 = (0x0BB8)*0.1 - 40 = 300 - 40 = 260 stupnu */
+    uint8_t data[9] = { 0x0F, 0x00, 0x00,
+                              0x0B, 0xB8,
+                              0x00, 0x00,
+                              0x00, 0x00 };
+    float s = obd2_decode_pid_secondary(0x78, data, 9);
+    TEST_ASSERT_EQUAL_FLOAT(260.0f, s, FLT_TOL);
+}
+
+void test_decode_pid_78_temp_4s_unsupported_sensor1_returns_nan(void)
+{
+    /* support = 0x0E (senzor 1 NEpodporovan, 2-4 ano) -> primarni = NAN */
+    uint8_t data[9] = { 0x0E, 0x0A, 0xF0,
+                              0x0A, 0xF0,
+                              0x0A, 0xF0,
+                              0x0A, 0xF0 };
+    float v = obd2_decode_pid_value(0x78, data, 9);
+    TEST_ASSERT_NAN(v);
+}
+
+void test_decode_pid_78_temp_4s_extras_for_sensors_3_4(void)
+{
+    /* support = 0x0F, senzor 3 = 250 stupnu, senzor 4 = 200 stupnu
+     *   senzor 3: (256*0x0B + 0x54)*0.1 - 40 = (2900)*0.1 - 40 = 250
+     *   senzor 4: (256*0x09 + 0x60)*0.1 - 40 = (2400)*0.1 - 40 = 200 */
+    uint8_t data[9] = { 0x0F, 0x00, 0x00,
+                              0x00, 0x00,
+                              0x0B, 0x54,
+                              0x09, 0x60 };
+    float extra[2] = { 999.0f, 999.0f };
+    uint8_t valid_count = obd2_decode_pid_extras(0x78, data, 9, extra);
+
+    TEST_ASSERT_EQUAL_INT(4, valid_count);
+    TEST_ASSERT_EQUAL_FLOAT(250.0f, extra[0], FLT_TOL);
+    TEST_ASSERT_EQUAL_FLOAT(200.0f, extra[1], FLT_TOL);
+}
+
+/* ========================================================================= */
+/*  Test 11e: NOX_4S (PID $83 -- NOx 4 senzory)                              */
+/* ========================================================================= */
+
+/*
+ * Format dat (9 B): A B C D E F G H I
+ *   A:    bity 0..3 = podpora senzoru
+ *   B,C:  senzor 1 = (256B+C) ppm  (0xFFFF = invalid)
+ */
+void test_decode_pid_83_nox_4s_sensor1(void)
+{
+    /* support = 0x01, senzor 1 = 0x01F4 = 500 ppm */
+    uint8_t data[9] = { 0x01, 0x01, 0xF4,
+                              0x00, 0x00,
+                              0x00, 0x00,
+                              0x00, 0x00 };
+    float v = obd2_decode_pid_value(0x83, data, 9);
+    TEST_ASSERT_EQUAL_FLOAT(500.0f, v, FLT_TOL);
+}
+
+void test_decode_pid_83_nox_4s_invalid_value_returns_nan(void)
+{
+    /* support bit nastaven, ale hodnota = 0xFFFF (invalid mereni) -> NAN */
+    uint8_t data[9] = { 0x01, 0xFF, 0xFF,
+                              0x00, 0x00,
+                              0x00, 0x00,
+                              0x00, 0x00 };
+    float v = obd2_decode_pid_value(0x83, data, 9);
+    TEST_ASSERT_NAN(v);
+}
+
+/* ========================================================================= */
+/*  Test 11f: RAW format (PID $64 -- engine percent torque)                  */
+/* ========================================================================= */
+
+/*
+ * RAW: hodnota se nedekoduje (vraci NAN). Frontend zobrazi raw bajty primo.
+ * Test: verify that decode returns NAN even with valid-looking data.
+ */
+void test_decode_pid_64_raw_returns_nan(void)
+{
+    uint8_t data[5] = { 0x80, 0x90, 0xA0, 0xB0, 0xC0 };
+    float v = obd2_decode_pid_value(0x64, data, 5);
+    TEST_ASSERT_NAN(v);
+}
+
+/* ========================================================================= */
+/*  Test 11g: obd2_get_pid_descriptor                                        */
+/* ========================================================================= */
+
+/*
+ * Lookup PID deskriptoru musi vratit non-NULL pro standardni PIDy a NULL
+ * pro zcela neznamy PID (mimo Annex B tabulky).
+ */
+void test_get_pid_descriptor_known_pid_returns_non_null(void)
+{
+    const obd2_pid_desc_t *desc = obd2_get_pid_descriptor(0x0C);
+    TEST_ASSERT_NOT_NULL(desc);
+    TEST_ASSERT_EQUAL_HEX(0x0C, desc->pid);
+    TEST_ASSERT_EQUAL_INT(2, desc->data_len);
+}
+
+void test_get_pid_descriptor_format_for_a6_is_linear_4b(void)
+{
+    const obd2_pid_desc_t *desc = obd2_get_pid_descriptor(0xA6);
+    TEST_ASSERT_NOT_NULL(desc);
+    TEST_ASSERT_EQUAL_INT(OBD2_FMT_LINEAR_4B, desc->format);
+    TEST_ASSERT_EQUAL_INT(4, desc->data_len);
+}
+
+/* ========================================================================= */
 /*  Test 12: obd2_status_str (prevod stavovych kodu na retezce)              */
 /* ========================================================================= */
 
@@ -544,6 +737,32 @@ void run_obd2_pids_tests(void)
     RUN_TEST(test_decode_pid_secondary_non_o2_returns_nan);
     RUN_TEST(test_decode_pid_secondary_null_data);
     RUN_TEST(test_decode_pid_secondary_short_data);
+
+    /* LINEAR_4B (PID $A6 odometer) */
+    RUN_TEST(test_decode_pid_A6_odometer_zero);
+    RUN_TEST(test_decode_pid_A6_odometer_10000km);
+    RUN_TEST(test_decode_pid_A6_odometer_short_data_returns_nan);
+
+    /* ENUM (PID $1C OBD standard, $51 fuel type) */
+    RUN_TEST(test_decode_pid_1C_obd_standard_eobd);
+    RUN_TEST(test_decode_pid_51_fuel_type_diesel);
+
+    /* TEMP_4S (PID $78 EGT bank 1) */
+    RUN_TEST(test_decode_pid_78_temp_4s_sensor1);
+    RUN_TEST(test_decode_pid_78_temp_4s_sensor2);
+    RUN_TEST(test_decode_pid_78_temp_4s_unsupported_sensor1_returns_nan);
+    RUN_TEST(test_decode_pid_78_temp_4s_extras_for_sensors_3_4);
+
+    /* NOX_4S (PID $83) */
+    RUN_TEST(test_decode_pid_83_nox_4s_sensor1);
+    RUN_TEST(test_decode_pid_83_nox_4s_invalid_value_returns_nan);
+
+    /* RAW (PID $64) */
+    RUN_TEST(test_decode_pid_64_raw_returns_nan);
+
+    /* PID descriptor lookup */
+    RUN_TEST(test_get_pid_descriptor_known_pid_returns_non_null);
+    RUN_TEST(test_get_pid_descriptor_format_for_a6_is_linear_4b);
 
     /* Prevod stavovych kodu a NRC */
     RUN_TEST(test_status_str_known_codes);
