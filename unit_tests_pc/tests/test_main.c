@@ -22,6 +22,7 @@ extern void run_isotp_tests(void);
 extern void run_obd2_pids_tests(void);
 extern void run_obd2_diag_tests(void);
 extern void run_obd2_tests(void);
+extern void run_obd2_modes_tests(void);
 
 int main(void)
 {
@@ -50,6 +51,12 @@ int main(void)
     /* ------------------------------------------------------------ */
     printf("\n### OBD-II integration (mocked ISO-TP) ###\n");
     run_obd2_tests();
+
+    /* ------------------------------------------------------------ */
+    /*  5) OBD-II ostatni mody, NRC, ECU binding, multi-ECU         */
+    /* ------------------------------------------------------------ */
+    printf("\n### OBD-II modes 02/07/0A, NRC, binding, multi-ECU ###\n");
+    run_obd2_modes_tests();
 
     return UNITY_END();
 }
