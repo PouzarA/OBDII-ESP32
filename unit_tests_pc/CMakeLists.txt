@@ -56,6 +56,9 @@ add_executable(run_tests
 target_include_directories(run_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks
     ${SRC_DIR}
+    ${SRC_DIR}/src/core
+    ${SRC_DIR}/src/isotp
+    ${SRC_DIR}/src/config
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
@@ -74,6 +77,9 @@ add_executable(obd_interp
 target_include_directories(obd_interp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks
     ${SRC_DIR}
+    ${SRC_DIR}/src/core
+    ${SRC_DIR}/src/isotp
+    ${SRC_DIR}/src/config
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/interpreter )
     

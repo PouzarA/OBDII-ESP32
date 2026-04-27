@@ -21,7 +21,7 @@ if [[ "${1:-}" == "memcheck" ]]; then
     CFLAGS="$CFLAGS -fsanitize=address"
 fi
 gcc $CFLAGS \
-    -I mocks -I "$SRC/src/core" -I "$SRC/src/isotp" -I . \
+    -I mocks -I "$SRC/src/core" -I "$SRC/src/isotp" -I "$SRC/src/config" -I . \
     -DUNIT_TEST_BUILD=1 \
     "$SRC/src/isotp/isotp.c" \
     "$SRC/src/core/obd2.c" \
