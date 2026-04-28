@@ -38,7 +38,16 @@ This architecture was specifically designed to prevent the time-critical CAN bus
 2. **OBD-II Application Layer (Execution on Core 1):**
    - The primary diagnostic layer running in a dedicated FreeRTOS task.
    - Safely blocks and waits for CAN responses without triggering Watchdog Timer (WDT) resets on the network stack.
-   - Formulates specific service requests such as Mode 01 (Current Data), Mode 02 (Freeze Frame), Mode 03 (Read DTCs), and Mode 09 (Vehicle Info).
+   - Implements the full set of emission-related diagnostic services defined by ISO 15031-5:
+     - **Mode 01** — Current powertrain data (live PIDs)
+     - **Mode 02** — Freeze frame snapshot at the moment of fault detection
+     - **Mode 03** — Confirmed (stored) Diagnostic Trouble Codes
+     - **Mode 04** — Clear DTCs and reset emission readiness monitors
+     - **Mode 07** — Pending DTCs from the current/last drive cycle
+     - **Mode 09** — Vehicle information (VIN, CalID, CVN, IPT, ECU name)
+     - **Mode 0A** — Permanent DTCs (immune to Mode 04 clearing)
+   - Captures Negative Response Codes (NRC) including `responsePending` (0x78) for diagnostics.
+   - Supports ECU discovery via broadcast (0x7DF) and per-ECU binding for unicast queries.
 
 3. **Transport Layer - ISO-TP (Execution on Core 1):**
    - Implements the ISO 15765-2 network protocol.
@@ -68,21 +77,51 @@ A breakdown of the core project structure, detailing the specific role of each m
 
 ## Testing & Validation (PC-based Unit Tests)
 
-To ensure the reliability of the diagnostic stack, the project includes a comprehensive suite of unit tests that can be executed on a standard PC. This approach allows for rapid development and verification of the protocol logic without needing physical access to a vehicle or an ESP32 board.
+To ensure the reliability of the diagnostic stack, the project includes a comprehensive suite of **153 unit tests** that can be executed on a standard PC. This approach allows for rapid development and verification of the protocol logic without needing physical access to a vehicle or an ESP32 board.
 
 ### Architecture
-The testing environment is located in the `unit_tests_pc/` directory and utilizes a **Mock Hardware Layer**. This layer simulates the ESP32's TWAI (CAN) peripheral and FreeRTOS timing functions, allowing the real C source code from `src/` to be compiled and executed on an x86/x64 architecture.
+The testing environment is located in the `unit_tests_pc/` directory and utilizes a **Mock Hardware Layer**. This layer simulates the ESP32's TWAI (CAN) peripheral and FreeRTOS timing functions, allowing the real C source code from `src/` to be compiled and executed on an x86/x64 architecture without modification.
 
-### Key Components
-- **Test Framework:** Utilizes `unity_lite` (located in the root of `unit_tests_pc/`), a custom, lightweight C unit testing framework.
-- **Automated Tests (`tests/`):**
-  - `test_isotp.c`: Validates ISO-TP transport layer (SF, FF, CF, FC), sequence numbers, and flow control timing.
-  - `test_obd2.c` / `test_obd2_pids.c`: Verifies decoding logic for various OBD-II PIDs and diagnostic services.
-  - `test_main.c`: Central test runner managing the execution of all test suites.
-- **Interactive Interpreter (`interpreter/`):**
-  - `obd_interpreter.c`: A CLI tool that allows developers to manually inject raw CAN hexadecimal frames and observe how the OBD stack parses them in real-time.
-  - `full_test_sequence_v2.txt`: Recorded ECU response sequences used for validation and regression testing.
-- **Hardware Mocks (`mocks/`):** Simulations of ESP32 TWAI driver and FreeRTOS tasks.
+The mock simulates time, RX/TX queues and error states (BUS_OFF, recovery, alerts), so the entire stack — including timeouts and retry logic — is exercised deterministically without waiting on real hardware.
+
+### Test Suites (`tests/`)
+- **`test_isotp.c` — ISO-TP transport layer (ISO 15765-2)**
+  - Frame types: Single Frame, First Frame, Consecutive Frame, Flow Control
+  - Multi-frame edge cases: SN wrap-around (>15 CFs), FF_DL=0, overflow, sequence error, CF timeout
+  - Buffer-overflow protection (sentinel test) against malicious oversized payloads
+  - Broadcast (0x7DF) with multiple ECU responses and ID-range filtering (0x7E8–0x7EF boundaries)
+  - BUS_OFF detection with full recovery sequence (success and failure paths)
+  - N_As TX timeout handling (distinct from BUS_OFF)
+  - Idempotent `init`/`deinit` and Flow Control padding correctness
+- **`test_obd2_pids.c` — PID decoding (Annex B coverage)**
+  - All 14 decoder formats: `LINEAR_1B/2B/4B`, `SIGNED_OFFSET_1B`, `SIGNED_2B`, `BIT_ENCODED`, `O2_CONV`, `O2_WIDE_EQ_V/I`, `CONFIG`, `ENUM`, `TEMP_4S`, `NOX_4S`, `RAW`
+  - Multi-sensor PIDs (PID $78 EGT 4 sensors, $83 NOx) with support-bit and 0xFFFF invalid handling
+  - Monitor status (PID $01) MIL/DTC count and continuous/non-continuous monitor parsing
+- **`test_obd2_diag.c` — DTC string decoder (SAE J2012)**
+  - All four prefixes (P/C/B/U), boundary values, manufacturer-specific bit, NULL safety
+- **`test_obd2.c` — OBD-II integration (Modes 01/03/04/09)**
+  - Mode 01 PID raw + decoded happy paths, NRC capture, echo mismatch, timeouts
+  - Mode 03 Read DTC: zero/two/five DTCs (single and multi-frame), buffer truncation safety
+  - Mode 04 Clear DTC: success and `conditionsNotCorrect` rejection
+  - Mode 09 VIN multi-frame and ECU name SF, malformed-input edge cases
+  - Lifecycle: init/deinit idempotency, NULL guards
+- **`test_obd2_modes.c` — Extended services and state machine**
+  - Mode 02 Freeze Frame (happy path, PID mismatch detection, NULL guards)
+  - Mode 07 Pending DTC and Mode 0A Permanent DTC
+  - NRC `responsePending` (0x78) capture and decoding
+  - ECU binding state machine (`set_ecu_address`, `bind_active_ecu`, range validation)
+  - PID discovery via broadcast (`query_supported_pids`, `is_pid_supported`)
+  - Multi-ECU aggregators (`read_dtc_multi`, `read_vin_all`, `read_infotype_all`)
+  - Raw query API (unicast vs broadcast variants)
+- **`test_main.c`** — Central runner that executes all five suites and reports pass/fail.
+
+### Hardware Mocks (`mocks/`)
+- **`mock_twai.c` / `mock_twai.h`** — Simulates TWAI driver: `twai_transmit/receive/get_status_info/initiate_recovery/read_alerts`. Supports injecting RX frames, capturing TX frames, advancing simulated time, forcing TX failures, and forcing recovery to either succeed or stay in BUS_OFF.
+- **`driver/twai.h`, `freertos/*.h`, `esp_err.h`** — ESP-IDF header replacements providing only the symbols the stack actually uses.
+
+### Interactive Interpreter (`interpreter/`)
+- **`obd_interpreter.c`** — A CLI tool that lets developers inject raw CAN hexadecimal frames and observe how the OBD-II stack parses them in real-time.
+- **`full_test_sequence_v2.txt`** — Recorded ECU response sequences used for validation and regression testing against real-world traces.
 
 ### Running the Tests
 The test suite can be built using either **CMake** (for IDE integration) or a **Bash script** (for quick CLI use).
@@ -99,9 +138,12 @@ cmake --build build
 #### Option B: Using Bash Script (requires GCC)
 ```bash
 cd unit_tests_pc
-./build.sh run           # Compiles and executes all tests
-./build.sh memcheck      # Runs tests with AddressSanitizer (ASan) to detect memory leaks/errors
+./build.sh               # Compile only
+./build.sh run           # Compile and execute all tests
+./build.sh memcheck      # Run tests with AddressSanitizer (ASan) for leak/error detection
 ```
+
+The expected output ends with `=== 153 tests, 0 failed ===` on a clean run.
 
 ## Dependencies
 
