@@ -7,7 +7,10 @@
 
 ## Dashboard Preview
 
-![Main Dashboard](Figures/Testing/Testing_upload_version_02_05/DASH_auto_stoji_motor_off.png)
+<div align="center">
+  <img src="Figures/Testing/Testing_upload_version_02_05/DASH_auto_stoji_motor_off.png" alt="Main Dashboard" width="450">
+</div>
+
 
 
 An ESP32-based wireless OBD-II diagnostic scanner. This project implements the OBD-II standard (ISO 15765-4 via CAN bus) and provides a real-time web-based dashboard accessible over Wi-Fi using WebSockets.
