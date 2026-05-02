@@ -5,7 +5,7 @@
 ![Protocol](https://img.shields.io/badge/OBD--II-ISO--15765--4-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
-An ESP32-based wireless OBD-II diagnostic scanner. This project implements the OBD-II standard (ISO 15765-4 via CAN bus) and provides a real-time web-based dashboard accessible over Wi-Fi using WebSockets. 
+An ESP32-based wireless OBD-II diagnostic scanner. This project implements the OBD-II standard (ISO 15765-4 via CAN bus) and provides a real-time web-based dashboard accessible over Wi-Fi using WebSockets.
 
 This project was developed as a part of a Bachelor's thesis implementation.
 
@@ -13,7 +13,7 @@ This project was developed as a part of a Bachelor's thesis implementation.
 
 - **Wireless Connectivity:** Creates its own Wi-Fi Access Point (AP). No external network required.
 - **Real-Time Web Dashboard:** Built-in dashboard served directly from ESP32 flash memory (`PROGMEM`), interacting with the scanner via WebSockets.
-- **Dual-Core Architecture:** 
+- **Dual-Core Architecture:**
   - **Core 0** handles network operations (Wi-Fi, HTTP Server, WebSockets) to ensure smooth communication.
   - **Core 1** handles OBD-II CAN bus communication using FreeRTOS tasks, avoiding interference with the Wi-Fi stack.
 - **Thread-safe FreeRTOS Integration:** Safely passes data between cores using FreeRTOS queues.
@@ -34,16 +34,16 @@ This architecture was specifically designed to prevent the time-critical CAN bus
    - Manages Wi-Fi Access Point creation, serving HTTP requests, and maintaining live WebSocket connections.
    - Built on top of `ESPAsyncWebServer` for non-blocking network operations.
    - Converts user interface commands to internal triggers and formats outgoing responses using `ArduinoJson`.
-   
+
 2. **OBD-II Application Layer (Execution on Core 1):**
    - The primary diagnostic layer running in a dedicated FreeRTOS task.
    - Safely blocks and waits for CAN responses without triggering Watchdog Timer (WDT) resets on the network stack.
    - Formulates specific service requests such as Mode 01 (Current Data), Mode 02 (Freeze Frame), Mode 03 (Read DTCs), and Mode 09 (Vehicle Info).
-   
+
 3. **Transport Layer - ISO-TP (Execution on Core 1):**
    - Implements the ISO 15765-2 network protocol.
    - Responsible for fragmenting large outgoing payloads into multiple 8-byte CAN frames and reassembling incoming multi-frame messages using standard Flow Control (FC) logic.
-   
+
 4. **Data Link Layer - TWAI (Execution on Core 1):**
    - Interfaces directly with the ESP32's built-in Two-Wire Automotive Interface (TWAI) peripheral.
    - Drives the external physical CAN transceiver (e.g., SN65HVD230).
@@ -65,6 +65,43 @@ A breakdown of the core project structure, detailing the specific role of each m
 - **`src/core/obd2_internal.h`**: Shared internal definitions and data structures for the OBD-II routing logic.
 - **`src/isotp/isotp.h` / `.c`**: The ISO-TP protocol module implementation. Contains standard algorithms for parsing Single Frames (SF), First Frames (FF), Consecutive Frames (CF), and Flow Control (FC) messaging.
 - **`src/web/dashboard.h`**: A complete Single-Page Application (SPA) web dashboard built with HTML, CSS, and JS. It is stored directly in the ESP32 `PROGMEM` flash storage to preserve runtime heap memory.
+
+## Testing & Validation (PC-based Unit Tests)
+
+To ensure the reliability of the diagnostic stack, the project includes a comprehensive suite of unit tests that can be executed on a standard PC. This approach allows for rapid development and verification of the protocol logic without needing physical access to a vehicle or an ESP32 board.
+
+### Architecture
+The testing environment is located in the `unit_tests_pc/` directory and utilizes a **Mock Hardware Layer**. This layer simulates the ESP32's TWAI (CAN) peripheral and FreeRTOS timing functions, allowing the real C source code from `src/` to be compiled and executed on an x86/x64 architecture.
+
+### Key Components
+- **Test Framework:** Utilizes `unity_lite` (located in the root of `unit_tests_pc/`), a custom, lightweight C unit testing framework.
+- **Automated Tests (`tests/`):**
+  - `test_isotp.c`: Validates ISO-TP transport layer (SF, FF, CF, FC), sequence numbers, and flow control timing.
+  - `test_obd2.c` / `test_obd2_pids.c`: Verifies decoding logic for various OBD-II PIDs and diagnostic services.
+  - `test_main.c`: Central test runner managing the execution of all test suites.
+- **Interactive Interpreter (`interpreter/`):**
+  - `obd_interpreter.c`: A CLI tool that allows developers to manually inject raw CAN hexadecimal frames and observe how the OBD stack parses them in real-time.
+  - `full_test_sequence_v2.txt`: Recorded ECU response sequences used for validation and regression testing.
+- **Hardware Mocks (`mocks/`):** Simulations of ESP32 TWAI driver and FreeRTOS tasks.
+
+### Running the Tests
+The test suite can be built using either **CMake** (for IDE integration) or a **Bash script** (for quick CLI use).
+
+#### Option A: Using CMake
+```bash
+cd unit_tests_pc
+cmake -S . -B build -G "MinGW Makefiles"
+cmake --build build
+./build/run_tests.exe    # Run automated test suite
+./build/obd_interp.exe   # Run interactive interpreter
+```
+
+#### Option B: Using Bash Script (requires GCC)
+```bash
+cd unit_tests_pc
+./build.sh run           # Compiles and executes all tests
+./build.sh memcheck      # Runs tests with AddressSanitizer (ASan) to detect memory leaks/errors
+```
 
 ## Dependencies
 
