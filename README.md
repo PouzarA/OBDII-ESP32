@@ -54,15 +54,17 @@ This architecture was specifically designed to prevent the time-critical CAN bus
 
 A breakdown of the core project structure, detailing the specific role of each module:
 
+- **`src/config/config.h`**: Centralized configuration file containing all user-adjustable parameters (CAN pins, baud rates, Wi-Fi channels, FreeRTOS task sizes, and ISO-TP/OBD-II timeouts).
+- **`src/config/secrets.h`**: Secure storage for sensitive credentials such as Wi-Fi passwords and WebSocket authentication tokens. Designed to be easily excluded from version control.
 - **`obdII_wifi.ino`**: The main Arduino sketch serving as the entry point. Responsible for overall system configuration, initializing FreeRTOS queues, mapping tasks to specific processor cores, and configuring the Wi-Fi AP.
-- **`ws_handler.h` / `.cpp`**: The WebSocket messaging infrastructure. It handles asynchronous event dispatching, parses incoming JSON payloads from the client, and safely routes them to the OBD task.
-- **`ws_commands.cpp`**: The implementation of all individual WebSocket OBD command handlers. It explicitly maps string commands (like `"read_pid"`) to their respective core OBD-II functions.
-- **`obd2.h` / `.c`**: The core API for vehicle system interaction. It manages the top-level ECU request/response state machine and payload validation.
-- **`obd2_pids.c`**: Responsible for reading and decoding Parameter IDs for Mode 01 (Live Data) and Mode 02 (Freeze Frame). Contains the mathematical conversions to turn raw hexadecimal CAN payloads into human-readable engineering units (e.g., RPM, Temperature).
-- **`obd2_diag.c`**: Dedicated module for reading Diagnostic Trouble Codes (DTCs), decoding emission readiness statuses, and clearing fault records.
-- **`obd2_internal.h`**: Shared internal definitions and data structures for the OBD-II routing logic.
-- **`isotp.h` / `.c`**: The ISO-TP protocol module implementation. Contains standard algorithms for parsing Single Frames (SF), First Frames (FF), Consecutive Frames (CF), and Flow Control (FC) messaging.
-- **`dashboard.h`**: A complete Single-Page Application (SPA) web dashboard built with HTML, CSS, and JS. It is stored directly in the ESP32 `PROGMEM` flash storage to preserve runtime heap memory.
+- **`src/web/ws_handler.h` / `.cpp`**: The WebSocket messaging infrastructure. It handles asynchronous event dispatching, parses incoming JSON payloads from the client, and safely routes them to the OBD task.
+- **`src/web/ws_commands.cpp`**: The implementation of all individual WebSocket OBD command handlers. It explicitly maps string commands (like `"read_pid"`) to their respective core OBD-II functions.
+- **`src/core/obd2.h` / `.c`**: The core API for vehicle system interaction. It manages the top-level ECU request/response state machine and payload validation.
+- **`src/core/obd2_pids.c`**: Responsible for reading and decoding Parameter IDs for Mode 01 (Live Data) and Mode 02 (Freeze Frame). Contains the mathematical conversions to turn raw hexadecimal CAN payloads into human-readable engineering units (e.g., RPM, Temperature).
+- **`src/core/obd2_diag.c`**: Dedicated module for reading Diagnostic Trouble Codes (DTCs), decoding emission readiness statuses, and clearing fault records.
+- **`src/core/obd2_internal.h`**: Shared internal definitions and data structures for the OBD-II routing logic.
+- **`src/isotp/isotp.h` / `.c`**: The ISO-TP protocol module implementation. Contains standard algorithms for parsing Single Frames (SF), First Frames (FF), Consecutive Frames (CF), and Flow Control (FC) messaging.
+- **`src/web/dashboard.h`**: A complete Single-Page Application (SPA) web dashboard built with HTML, CSS, and JS. It is stored directly in the ESP32 `PROGMEM` flash storage to preserve runtime heap memory.
 
 ## Dependencies
 
